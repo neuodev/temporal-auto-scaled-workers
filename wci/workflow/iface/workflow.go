@@ -86,6 +86,11 @@ type (
 
 		PendingTaskAddSignals []*SignalTaskAddRequest `json:"pending_task_add_signals,omitempty"`
 
+		// NextPollTime is when the next metrics poll is due. Persisted so the cadence survives
+		// continue-as-new; the run loop polls when it passes, instead of a selector timer that a
+		// sustained task-add signal load starves out of the Select.
+		NextPollTime *timestamppb.Timestamp `json:"next_poll_time,omitempty"`
+
 		ConflictToken        []byte                 `json:"conflict_token,omitempty"`
 		CreateTime           *timestamppb.Timestamp `json:"create_time,omitempty"`
 		LastModifierIdentity string                 `json:"last_modifier_identity,omitempty"`

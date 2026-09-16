@@ -37,6 +37,11 @@ const (
 	maxPendingTaskAddSignals = 4000
 
 	taskAddSignalQueueLimitPatch = "taskAddSignalQueueLimit"
+
+	// loopDrivenPollPatch drives the metrics poll from the run loop on a persisted deadline
+	// (State.NextPollTime) instead of a selector timer, which a sustained task-add signal load
+	// starves out of Select. When active, no stats-pull timer is armed.
+	loopDrivenPollPatch = "loopDrivenPoll"
 )
 
 type WorkerControllerInstanceWorkflowVersion int64
@@ -90,6 +95,7 @@ type (
 		forceCAN      bool
 
 		limitPendingTaskAddSignals bool
+		useLoopDrivenPoll          bool
 
 		// workflowVersion is set at workflow start based on the dynamic config of the worker
 		// that completes the first task. It remains constant for the lifetime of the run and
@@ -200,6 +206,7 @@ func (d *WorkflowRunner) run(ctx workflow.Context) error {
 	}
 
 	d.limitPendingTaskAddSignals = workflow.GetVersion(ctx, taskAddSignalQueueLimitPatch, workflow.DefaultVersion, 1) > workflow.DefaultVersion
+	d.useLoopDrivenPoll = workflow.GetVersion(ctx, loopDrivenPollPatch, workflow.DefaultVersion, 1) > workflow.DefaultVersion
 	if !d.limitPendingTaskAddSignals {
 		// Process the signals from the prior run (pre-CaN)
 		d.processPendingTaskAddSignals(ctx)
@@ -235,7 +242,11 @@ func (d *WorkflowRunner) run(ctx workflow.Context) error {
 			addStatsPullTimer(nextPollDuration)
 		})
 	}
-	addStatsPullTimer(maxPollInterval)
+	if !d.useLoopDrivenPoll {
+		// Legacy: a selector timer drives the poll. Under the loopDrivenPoll patch the run loop
+		// polls instead (see pollIfDue), so no stats-pull timer is armed.
+		addStatsPullTimer(maxPollInterval)
+	}
 
 	if d.hasMinVersion(PeriodicValidationVersion) {
 		// Read once at run start. Dynamic config changes take effect at the next
@@ -269,6 +280,12 @@ func (d *WorkflowRunner) run(ctx workflow.Context) error {
 
 	// Keep waiting for signals, when it's time to CaN the main goroutine will exit.
 	for !d.shouldContinueAsNew(ctx) {
+		// Loop-driven poll: fire the metrics poll when its persisted deadline has passed, so a
+		// sustained task-add signal load can't starve it. A cheap no-op until NextPollTime elapses.
+		if d.useLoopDrivenPoll {
+			d.pollIfDue(ctx)
+		}
+
 		if d.limitPendingTaskAddSignals && d.processNextQueuedTaskAddSignal(ctx) {
 			continue
 		}
@@ -513,6 +530,27 @@ func (d *WorkflowRunner) handleDeleteInstance(ctx workflow.Context, args *iface.
 	d.updateMetric(wcimetrics.UpdateTypeDeleteInstance).recordSuccess()
 
 	return &iface.DeleteWorkerControllerInstanceResponse{}, nil
+}
+
+// pollIfDue runs a metrics poll when State.NextPollTime has passed, then advances the deadline by
+// the interval the poll requests. It is driven from the run loop so a sustained task-add signal
+// load cannot starve it. A no-op until the deadline is reached, so it is cheap to call every lap.
+func (d *WorkflowRunner) pollIfDue(ctx workflow.Context) {
+	if d.State == nil {
+		return
+	}
+	now := workflow.Now(ctx)
+	// First encounter (nil deadline, e.g. a brand-new WCI): schedule one interval out rather than
+	// polling at birth. NextPollTime is persisted, so this happens once, not on every CaN.
+	if d.State.NextPollTime == nil {
+		d.State.NextPollTime = timestamppb.New(now.Add(maxPollInterval))
+		return
+	}
+	if now.Before(d.State.NextPollTime.AsTime()) {
+		return
+	}
+	next := d.pullStatsAndUpdate(ctx)
+	d.State.NextPollTime = timestamppb.New(now.Add(next))
 }
 
 func (d *WorkflowRunner) pullStatsAndUpdate(ctx workflow.Context) time.Duration {

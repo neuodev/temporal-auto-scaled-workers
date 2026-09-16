@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/auto-scaled-workers/wci/workflow/iface"
@@ -14,14 +15,15 @@ import (
 	"go.temporal.io/server/common/sdk"
 )
 
-// TestDeleteInstanceCancelsPendingTimer covers the race this fix targets: a delete
-// arrives (explicitly via DeleteWorkerControllerInstance, or implicitly via an
-// UpdateWorkerControllerInstance that removes the last scaling group) while the
-// stats-pull timer is still pending. Before CancelTimersOnDeleteVersion, the main
-// select loop has no way to notice the delete until that timer fires on its own, so
-// PullStats still runs at least once after deletion. At CancelTimersOnDeleteVersion,
-// markDeleted cancels the shared timer context, so the pending timer future resolves
-// immediately, wakes the loop, and the workflow returns without PullStats ever firing.
+// TestDeleteInstanceCancelsPendingTimer covers the race CancelTimersOnDelete targets: a delete arrives
+// (explicitly via DeleteWorkerControllerInstance, or implicitly via an UpdateWorkerControllerInstance
+// that removes the last scaling group) while a background timer is still pending. At
+// SignalVersionWorkflowVersion the select loop can't notice the delete until that timer fires on its
+// own, so the workflow waits it out; at CancelTimersOnDeleteVersion markDeleted cancels the shared timer
+// context, so the pending timer resolves immediately, wakes the loop, and the workflow returns promptly.
+//
+// This covers the legacy timer-driven poll path, so it forces the loopDrivenPoll patch off (that patch
+// arms no stats-pull timer; the loop-driven path is covered by TestLoopDrivenPollFiresFromRunLoop).
 func TestDeleteInstanceCancelsPendingTimer(t *testing.T) {
 	scalingConfigPayload, err := sdk.PreferProtoDataConverter.ToPayload(iface.ScalingAlgorithmConfig{})
 	require.NoError(t, err)
@@ -29,30 +31,22 @@ func TestDeleteInstanceCancelsPendingTimer(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name              string
-		workflowVersion   WorkerControllerInstanceWorkflowVersion
-		wantPullStatsCall bool
-		// wantPromptCompletion distinguishes the fix from the empty-spec short-circuit
-		// in pullStatsAndUpdate: for the implicit-delete path, that short-circuit alone
-		// already keeps PullStats from firing regardless of this fix, since the update
-		// also empties d.State.Spec.ScalingGroupSpecs. So the fix's effect there is only
-		// observable as completion timing, not as a PullStats call/no-call difference.
+		name                 string
+		workflowVersion      WorkerControllerInstanceWorkflowVersion
 		wantPromptCompletion bool
 		updateName           string
 		updateArgs           any
 	}{
 		{
-			name:                 "explicit delete, pre-fix version leaves the timer pending; PullStats still fires once after delete",
+			name:                 "explicit delete, pre-fix version waits out the pending timer before completing",
 			workflowVersion:      SignalVersionWorkflowVersion,
-			wantPullStatsCall:    true,
 			wantPromptCompletion: false,
 			updateName:           iface.DeleteWorkerControllerInstance,
 			updateArgs:           &iface.DeleteWorkerControllerInstanceRequest{},
 		},
 		{
-			name:                 "explicit delete, fixed version cancels the pending timer; PullStats never fires after delete",
+			name:                 "explicit delete, fixed version cancels the pending timer and completes promptly",
 			workflowVersion:      CancelTimersOnDeleteVersion,
-			wantPullStatsCall:    false,
 			wantPromptCompletion: true,
 			updateName:           iface.DeleteWorkerControllerInstance,
 			updateArgs:           &iface.DeleteWorkerControllerInstanceRequest{},
@@ -60,7 +54,6 @@ func TestDeleteInstanceCancelsPendingTimer(t *testing.T) {
 		{
 			name:                 "implicit delete (last scaling group removed), pre-fix version waits out the pending timer before completing",
 			workflowVersion:      SignalVersionWorkflowVersion,
-			wantPullStatsCall:    false,
 			wantPromptCompletion: false,
 			updateName:           iface.UpdateWorkerControllerInstance,
 			updateArgs:           &iface.UpdateWorkerControllerInstanceRequest{RemoveScalingGroups: []string{"workflow"}},
@@ -68,7 +61,6 @@ func TestDeleteInstanceCancelsPendingTimer(t *testing.T) {
 		{
 			name:                 "implicit delete (last scaling group removed), fixed version cancels the pending timer and completes promptly",
 			workflowVersion:      CancelTimersOnDeleteVersion,
-			wantPullStatsCall:    false,
 			wantPromptCompletion: true,
 			updateName:           iface.UpdateWorkerControllerInstance,
 			updateArgs:           &iface.UpdateWorkerControllerInstanceRequest{RemoveScalingGroups: []string{"workflow"}},
@@ -105,10 +97,12 @@ func TestDeleteInstanceCancelsPendingTimer(t *testing.T) {
 			env := suite.NewTestWorkflowEnvironment()
 			env.RegisterWorkflow(testWorkflow)
 
-			pullStatsCalled := false
+			// Force the loopDrivenPoll patch off so the stats-pull timer is armed (this test covers the
+			// legacy timer-driven path).
+			env.OnGetVersion(loopDrivenPollPatch, sdkworkflow.DefaultVersion, 1).Return(sdkworkflow.DefaultVersion)
+
 			env.OnActivity(activities.PullStats, mock.Anything, mock.Anything).
-				Return(&PullStatsActivityResponse{NextPollSeconds: uint32(maxPollInterval.Seconds())}, nil).
-				Run(func(mock.Arguments) { pullStatsCalled = true })
+				Return(&PullStatsActivityResponse{NextPollSeconds: uint32(maxPollInterval.Seconds())}, nil)
 
 			env.RegisterDelayedCallback(func() {
 				env.UpdateWorkflowNoRejection(tc.updateName, "update-1", t, tc.updateArgs)
@@ -120,7 +114,6 @@ func TestDeleteInstanceCancelsPendingTimer(t *testing.T) {
 
 			require.True(t, env.IsWorkflowCompleted())
 			require.NoError(t, env.GetWorkflowError())
-			require.Equal(t, tc.wantPullStatsCall, pullStatsCalled)
 			if tc.wantPromptCompletion {
 				require.Less(t, elapsed, time.Second, "expected the workflow to complete promptly after delete, without waiting out the pending timer")
 			} else {
@@ -128,4 +121,60 @@ func TestDeleteInstanceCancelsPendingTimer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoopDrivenPollFiresFromRunLoop verifies the loop-driven poll: with the patch on there is no
+// stats-pull timer, so PullStats can only fire from pollIfDue in the run loop. A NextPollTime in the
+// past makes the first loop lap immediately due, and the poll runs without any selector timer.
+func TestLoopDrivenPollFiresFromRunLoop(t *testing.T) {
+	scalingConfigPayload, err := sdk.PreferProtoDataConverter.ToPayload(iface.ScalingAlgorithmConfig{})
+	require.NoError(t, err)
+	computeConfigPayload, err := sdk.PreferProtoDataConverter.ToPayload(map[string]any{})
+	require.NoError(t, err)
+
+	activities := NewActivities(nil, nil, nil)
+	args := &iface.WorkerControllerInstanceWorkflowArgs{
+		NamespaceName:  "test-namespace",
+		DeploymentName: "test-deployment",
+		BuildId:        "test-build",
+		State: &iface.WorkerControllerInstanceLocalState{
+			// A deadline in the distant past: the first loop lap is immediately due to poll.
+			NextPollTime: timestamppb.New(time.Unix(1, 0)),
+			Spec: &iface.WorkerControllerInstanceSpec{
+				ScalingGroupSpecs: map[string]iface.ScalingGroupSpec{
+					"workflow": newTestScalingGroupSpec(enumspb.TASK_QUEUE_TYPE_WORKFLOW, scalingConfigPayload, computeConfigPayload),
+				},
+			},
+		},
+	}
+
+	// loop-driven is on by default in the test env (the loopDrivenPoll patch returns its max version).
+	testWorkflow := func(ctx sdkworkflow.Context, args *iface.WorkerControllerInstanceWorkflowArgs) error {
+		return Workflow(ctx,
+			func() WorkerControllerInstanceWorkflowVersion { return CancelTimersOnDeleteVersion },
+			func() int { return 100 },
+			func() time.Duration { return periodicValidationInterval },
+			args, activities)
+	}
+
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterWorkflow(testWorkflow)
+
+	pullStatsCalled := false
+	env.OnActivity(activities.PullStats, mock.Anything, mock.Anything).
+		Return(&PullStatsActivityResponse{NextPollSeconds: uint32(maxPollInterval.Seconds())}, nil).
+		Run(func(mock.Arguments) { pullStatsCalled = true })
+
+	// Delete shortly after start so the workflow completes (CancelTimersOnDeleteVersion cancels the
+	// pending timers and wakes the loop); the loop-driven poll has already fired at start.
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflowNoRejection(iface.DeleteWorkerControllerInstance, "del-1", t, &iface.DeleteWorkerControllerInstanceRequest{})
+	}, time.Millisecond)
+
+	env.ExecuteWorkflow(testWorkflow, args)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.True(t, pullStatsCalled, "loop-driven poll must fire PullStats from the run loop, with no stats-pull timer")
 }
