@@ -88,4 +88,12 @@ var (
 		int((6 * time.Hour).Seconds()), // 21600
 		`WorkerControllerPeriodicValidationIntervalSeconds controls the interval between periodic spec validation checks in seconds.`,
 	)
+	// A path rather than the token itself: dynamic config is plaintext on disk and
+	// commonly a ConfigMap, so credential material must not live here. Spec config is
+	// worse still, being persisted in WCI workflow history.
+	WorkerControllerCloudflareCredentialPath = dynamicconfig.NewGlobalTypedSetting(
+		"workercontroller.compute_providers.cloudflare.credential_path",
+		(*string)(nil),
+		`WorkerControllerCloudflareCredentialPath is the path to a JSON file {"type":"bearer","value":"<token>"} holding the credential the Cloudflare compute provider presents to the wake endpoint. Mount it from a secret store; it is re-read per provider construction, so rotation needs no restart.`,
+	)
 )

@@ -48,28 +48,30 @@ type (
 )
 
 const (
-	ComputeProviderTypeAWSLambda     ComputeProviderType = "aws-lambda"
-	ComputeProviderTypeAWSAgentCore  ComputeProviderType = "aws-agentcore"
-	ComputeProviderTypeAWSECS        ComputeProviderType = "aws-ecs"
-	ComputeProviderTypeSubprocess    ComputeProviderType = "subprocess"
-	ComputeProviderTypeK8s           ComputeProviderType = "k8s"
-	ComputeProviderTypeGCPCloudRun   ComputeProviderType = "gcp-cloud-run"
-	ComputeProviderTypeTestInvoke    ComputeProviderType = "test-invoke"
-	ComputeProviderTypeTestWorkerSet ComputeProviderType = "test-worker-set"
+	ComputeProviderTypeAWSLambda           ComputeProviderType = "aws-lambda"
+	ComputeProviderTypeAWSAgentCore        ComputeProviderType = "aws-agentcore"
+	ComputeProviderTypeAWSECS              ComputeProviderType = "aws-ecs"
+	ComputeProviderTypeSubprocess          ComputeProviderType = "subprocess"
+	ComputeProviderTypeK8s                 ComputeProviderType = "k8s"
+	ComputeProviderTypeGCPCloudRun         ComputeProviderType = "gcp-cloud-run"
+	ComputeProviderTypeTestInvoke          ComputeProviderType = "test-invoke"
+	ComputeProviderTypeTestWorkerSet       ComputeProviderType = "test-worker-set"
+	ComputeProviderTypeCloudflareContainer ComputeProviderType = "cloudflare-container"
 
 	ScalingAlgorithmNoSync    ScalingAlgorithmType = "no-sync"
 	ScalingAlgorithmRateBased ScalingAlgorithmType = "rate-based"
 )
 
 var validComputeProviderTypes = map[string]ComputeProviderType{
-	string(ComputeProviderTypeAWSLambda):     ComputeProviderTypeAWSLambda,
-	string(ComputeProviderTypeAWSAgentCore):  ComputeProviderTypeAWSAgentCore,
-	string(ComputeProviderTypeAWSECS):        ComputeProviderTypeAWSECS,
-	string(ComputeProviderTypeSubprocess):    ComputeProviderTypeSubprocess,
-	string(ComputeProviderTypeK8s):           ComputeProviderTypeK8s,
-	string(ComputeProviderTypeGCPCloudRun):   ComputeProviderTypeGCPCloudRun,
-	string(ComputeProviderTypeTestInvoke):    ComputeProviderTypeTestInvoke,
-	string(ComputeProviderTypeTestWorkerSet): ComputeProviderTypeTestWorkerSet,
+	string(ComputeProviderTypeAWSLambda):           ComputeProviderTypeAWSLambda,
+	string(ComputeProviderTypeAWSAgentCore):        ComputeProviderTypeAWSAgentCore,
+	string(ComputeProviderTypeAWSECS):              ComputeProviderTypeAWSECS,
+	string(ComputeProviderTypeSubprocess):          ComputeProviderTypeSubprocess,
+	string(ComputeProviderTypeK8s):                 ComputeProviderTypeK8s,
+	string(ComputeProviderTypeGCPCloudRun):         ComputeProviderTypeGCPCloudRun,
+	string(ComputeProviderTypeTestInvoke):          ComputeProviderTypeTestInvoke,
+	string(ComputeProviderTypeTestWorkerSet):       ComputeProviderTypeTestWorkerSet,
+	string(ComputeProviderTypeCloudflareContainer): ComputeProviderTypeCloudflareContainer,
 }
 
 var validScalingAlgorithmTypes = map[string]ScalingAlgorithmType{
